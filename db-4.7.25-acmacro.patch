@@ -1,0 +1,11 @@
+diff -up db-4.7.25/dist/configure.ac.acmacro db-4.7.25/dist/configure.ac
+--- db-4.7.25/dist/configure.ac.acmacro	2008-11-19 10:00:20.000000000 +0100
++++ db-4.7.25/dist/configure.ac	2008-11-19 10:01:17.000000000 +0100
+@@ -7,6 +7,7 @@ AC_INIT(Berkeley DB, __EDIT_DB_VERSION__
+ 	db-__EDIT_DB_VERSION__)
+ AC_CONFIG_SRCDIR([../db/db.c])
+ AC_CONFIG_HEADERS([db_config.h:config.hin])
++AC_CONFIG_MACRO_DIR([aclocal])
+ 
+ # Configure setup.
+ AC_CANONICAL_HOST()

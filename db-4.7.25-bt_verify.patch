@@ -1,0 +1,151 @@
+*** btree/bt_verify.c.orig	2008-03-11 14:07:01.000000000 -0700
+--- btree/bt_verify.c	2010-02-08 09:48:10.639032000 -0800
+***************
+*** 12,17 ****
+--- 12,18 ----
+  #include "dbinc/db_page.h"
+  #include "dbinc/db_verify.h"
+  #include "dbinc/btree.h"
++ #include "dbinc/lock.h"
+  #include "dbinc/mp.h"
+  
+  static int __bam_safe_getdata __P((DB *, DB_THREAD_INFO *,
+***************
+*** 859,864 ****
+--- 860,866 ----
+  	BKEYDATA *bk;
+  	BOVERFLOW *bo;
+  	BTREE *bt;
++ 	DBC *dbc;
+  	DBT dbta, dbtb, dup_1, dup_2, *p1, *p2, *tmp;
+  	ENV *env;
+  	VRFY_PAGEINFO *pip;
+***************
+*** 910,918 ****
+  	 * We alternate our use of dbta and dbtb so that we can walk
+  	 * through the page key-by-key without copying a dbt twice.
+  	 * p1 is always the dbt for index i - 1, and p2 for index i.
+  	 */
+! 	p1 = &dbta;
+  	p2 = &dbtb;
+  
+  	/*
+  	 * Loop through the entries.  nentries ought to contain the
+--- 912,923 ----
+  	 * We alternate our use of dbta and dbtb so that we can walk
+  	 * through the page key-by-key without copying a dbt twice.
+  	 * p1 is always the dbt for index i - 1, and p2 for index i.
++ 	 * Reset the data pointers in case we are retrying.
+  	 */
+! retry:	p1 = &dbta;
+! 	p1->data = NULL;
+  	p2 = &dbtb;
++ 	p2->data = NULL;
+  
+  	/*
+  	 * Loop through the entries.  nentries ought to contain the
+***************
+*** 921,932 ****
+  	 * on a leaf page, we care only about keys.  On internal pages
+  	 * and LDUP pages, we want to check the order of all entries.
+  	 *
+! 	 * Note that on IBTREE pages, we start with item 1, since item
+! 	 * 0 doesn't get looked at by __bam_cmp.
+  	 */
+  	inp = P_INP(dbp, h);
+  	adj = (TYPE(h) == P_LBTREE) ? P_INDX : O_INDX;
+! 	for (i = (TYPE(h) == P_IBTREE) ? 1 : 0; i < nentries; i += adj) {
+  		/*
+  		 * Put key i-1, now in p2, into p1, by swapping DBTs and bufs.
+  		 */
+--- 926,938 ----
+  	 * on a leaf page, we care only about keys.  On internal pages
+  	 * and LDUP pages, we want to check the order of all entries.
+  	 *
+! 	 * Note that on IBTREE pages or the index page of a partitioned
+! 	 * base, we start with item 1, since item 0 doesn't get looked
+! 	 * at by __bam_cmp.
+  	 */
+  	inp = P_INP(dbp, h);
+  	adj = (TYPE(h) == P_LBTREE) ? P_INDX : O_INDX;
+! 	for (i = (TYPE(h) == P_IBTREE) ? adj : 0; i < nentries; i += adj) {
+  		/*
+  		 * Put key i-1, now in p2, into p1, by swapping DBTs and bufs.
+  		 */
+***************
+*** 1016,1021 ****
+--- 1022,1030 ----
+  			 * was just pointing at a non-overflow item.)
+  			 */
+  			p2->data = buf2;
++ 			if ((ret = __db_cursor_int(dbp, ip, NULL, DB_BTREE,
++ 			    PGNO_INVALID, 0, DB_LOCK_INVALIDID, &dbc)) != 0)
++ 				goto err;
+  			if ((ret = __db_goff(dbp, ip, NULL,
+  			    p2, bo->tlen, bo->pgno, NULL, NULL)) != 0) {
+  				isbad = 1;
+***************
+*** 1033,1038 ****
+--- 1042,1059 ----
+  
+  			/* comparison succeeded */
+  			if (cmp > 0) {
++ 				/*
++ 				 * If we are looking at an internal page, we
++ 				 * don't know whether it is part of the main
++ 				 * database or in an off-page-duplicate tree.
++ 				 * If the main comparator fails, retry with
++ 				 * the duplicate comparator.
++ 				 */
++ 				if (TYPE(h) == P_IBTREE && func != dupfunc) {
++ 					func = dupfunc;
++ 					goto retry;
++ 				}
++ 
+  				isbad = 1;
+  				EPRINT((env,
+  				    "Page %lu: out-of-order key at entry %lu",
+***************
+*** 1040,1049 ****
+  				/* proceed */
+  			} else if (cmp == 0) {
+  				if (inp[i] != inp[i - adj]) {
+  					EPRINT((env,
+  				     "Page %lu: non-dup dup key at entry %lu",
+  					   (u_long)pgno, (u_long)i));
+- 					isbad = 1;
+  				}
+  				/*
+  				 * If they compared equally, this
+--- 1061,1076 ----
+  				/* proceed */
+  			} else if (cmp == 0) {
+  				if (inp[i] != inp[i - adj]) {
++ 					/* See above. */
++ 					if (TYPE(h) == P_IBTREE &&
++ 					    func != dupfunc) {
++ 						func = dupfunc;
++ 						goto retry;
++ 					}
++ 					isbad = 1;
+  					EPRINT((env,
+  				     "Page %lu: non-dup dup key at entry %lu",
+  					   (u_long)pgno, (u_long)i));
+  				}
+  				/*
+  				 * If they compared equally, this
+***************
+*** 1054,1059 ****
+--- 1081,1092 ----
+  				if (pip != NULL)
+  					F_SET(pip, VRFY_HAS_DUPS);
+  				else if (hasdups == 0) {
++ 					/* See above. */
++ 					if (TYPE(h) == P_IBTREE &&
++ 					    func != dupfunc) {
++ 						func = dupfunc;
++ 						goto retry;
++ 					}
+  					isbad = 1;
+  					EPRINT((env,
+  	"Page %lu: database with no duplicates has duplicated keys",
